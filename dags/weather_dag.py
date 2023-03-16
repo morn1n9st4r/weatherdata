@@ -20,14 +20,18 @@ ua_timezone = 2
 # airflow variable
 wwo_key = Variable.get("KEY_API_WWO")
 
-#cities_str = Variable.get("CITIES")
-#cities = cities_str.split(', ')
+cities_str = Variable.get("CITIES")
+cities = cities_str.split(', ')
 
-cities = ['Kiev', 'Chernihiv']
+#cities = [
+#    'Kiev', 'Chernihiv', 'Kharkiv', 'Kherson', 'Lviv', 'Ternopil', 'Odesa',
+#    'Donetsk Ukraine', 'Ivanofrankivsk', 'Chernivtsi', 'Cherkasy', 'Kirovohrad',
+#    'Lutsk Ukraine', 'Poltava', 'Rivne', 'Luhansk', 'Simferopol', 'Sumy', 'Uzhhorod',
+#    'Zhytomyr', 'Dnipropetrovsk', 'Zaporizhzhya', 'Mykolayiv', 'Khmelnytskyy', 'Vinnytsya'
+#]
 
 def extract_data(city, **kwargs):
     ti = kwargs['ti']
-    # Запрос на прогноз со следующего часа
     response = requests.get(
             'http://api.worldweatheronline.com/premium/v1/weather.ashx',
             params={
@@ -108,7 +112,7 @@ args = {
 
 with DAG('load_weater_data',
          description='loading data from wwo api',
-         schedule_interval='*/90 * * * *',
+         schedule_interval='0 */2 * * *',
          default_args=args,
          catchup=False
         ) as dag:
