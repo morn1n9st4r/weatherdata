@@ -7,6 +7,7 @@ import pandas as pd
 from airflow import DAG
 
 from airflow.operators.python_operator import PythonOperator
+from airflow.operators.dummy_operator import DummyOperator
 from airflow.operators.postgres_operator import PostgresOperator
 
 from airflow.models import Variable
@@ -56,7 +57,7 @@ def transform_data(city, **kwargs):
     request_data = json_data['data']['request']
     time_data = json_data['data']['time_zone']
     weather_data = json_data['data']['current_condition']
-    
+
     timestamp = datetime.datetime.strptime(time_data[0]['localtime'], '%Y-%m-%d %H:%M')
 
     js = {
@@ -77,6 +78,24 @@ def transform_data(city, **kwargs):
     ti.xcom_push(key=f'weather_{city}_json_filtered', value=js)
 
 
+def create_insert_query(city):
+    query = f"""
+    INSERT INTO weather_values VALUES (
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["date"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["time"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["city"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["weather"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["temp_C"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["temp_C_feels_like"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["wind_speed_kmph"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["wind_from"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["humidity"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["pressure"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["cloudcover"] }}}}'
+    )
+    """
+    return query
+
 
 args = {
     'owner' : 'Oleksii',
@@ -93,9 +112,37 @@ with DAG('load_weater_data',
          default_args=args
         ) as dag:
 
+    create_weather_table = PostgresOperator(
+                                task_id="create_weather_table",
+                                postgres_conn_id="postgres_weather",
+                                sql="""
+                                    CREATE TABLE IF NOT EXISTS weather_values (
+                                    date DATE NOT NULL,
+                                    time TIME NOT NULL,
+                                    city VARCHAR NOT NULL,
+                                    weather VARCHAR NOT NULL,
+                                    temp_C VARCHAR NOT NULL,
+                                    temp_C_feels_like VARCHAR NOT NULL,
+                                    wind_speed_kmph FLOAT NOT NULL,
+                                    wind_from VARCHAR NOT NULL,
+                                    humidity FLOAT NOT NULL,
+                                    pressure FLOAT NOT NULL,
+                                    cloudcover FLOAT NOT NULL);
+                                """,
+                                )
+
+    
+
     for city in cities:
         extract_data_tsk = PythonOperator(task_id=f'extract_data_{city}', python_callable=extract_data, op_kwargs={'city': city})
 
         transform_data_tsk  = PythonOperator(task_id=f'transform_data_{city}', python_callable=transform_data, op_kwargs={'city': city})
         
-        extract_data_tsk >> transform_data_tsk
+        push_data_tsk = PostgresOperator(
+            task_id=f"insert_weather_table_{city}",
+            postgres_conn_id="postgres_weather",
+            sql=create_insert_query(city))
+        extract_data_tsk >> transform_data_tsk >> create_weather_table >> push_data_tsk
+    
+
+
