@@ -108,8 +108,9 @@ args = {
 
 with DAG('load_weater_data',
          description='loading data from wwo api',
-         schedule='@daily',
-         default_args=args
+         schedule_interval='*/90 * * * *',
+         default_args=args,
+         catchup=False
         ) as dag:
 
     create_weather_table = PostgresOperator(
@@ -142,6 +143,7 @@ with DAG('load_weater_data',
             task_id=f"insert_weather_table_{city}",
             postgres_conn_id="postgres_weather",
             sql=create_insert_query(city))
+            
         extract_data_tsk >> transform_data_tsk >> create_weather_table >> push_data_tsk
     
 
