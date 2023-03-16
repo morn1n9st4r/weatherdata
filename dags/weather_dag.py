@@ -19,13 +19,18 @@ ua_timezone = 2
 # airflow variable
 wwo_key = Variable.get("KEY_API_WWO")
 
-def extract_data_kyiv(**kwargs):
+#cities_str = Variable.get("CITIES")
+#cities = cities_str.split(', ')
+
+cities = ['Kiev', 'Chernihiv']
+
+def extract_data(city, **kwargs):
     ti = kwargs['ti']
     # Запрос на прогноз со следующего часа
     response = requests.get(
             'http://api.worldweatheronline.com/premium/v1/weather.ashx',
             params={
-                'q':'Kiev',
+                'q':f'{city}',
                 'tp':'24',
                 'num_of_days':1,
                 'format':'json',
@@ -41,25 +46,19 @@ def extract_data_kyiv(**kwargs):
         json_data = response.json()
         print(json_data)
 
-        ti.xcom_push(key='wwo_kyiv_json', value=json_data)
+        ti.xcom_push(key=f'wwo_{city}_json', value=json_data)
 
 
 
-def transform_data_kyiv(**kwargs):
+def transform_data(city, **kwargs):
     ti = kwargs['ti']
-    json_data = ti.xcom_pull(key='wwo_kyiv_json', task_ids=['extract_data_kyiv'])[0]
+    json_data = ti.xcom_pull(key=f'wwo_{city}_json', task_ids=[f'extract_data_{city}'])[0]
     request_data = json_data['data']['request']
     time_data = json_data['data']['time_zone']
     weather_data = json_data['data']['current_condition']
-# 2023-03-16 20:11
+    
     timestamp = datetime.datetime.strptime(time_data[0]['localtime'], '%Y-%m-%d %H:%M')
-    """ 
-    print(timestamp)
-    date = timestamp.date()
-    print(date)
-    time = timestamp.time()
-    print(time)
-     """
+
     js = {
         'date': str(timestamp.date()),
         'time': str(timestamp.time()),
@@ -75,7 +74,7 @@ def transform_data_kyiv(**kwargs):
         
     }
 
-    ti.xcom_push(key='weather_kyiv_json_filtered', value=js)
+    ti.xcom_push(key=f'weather_{city}_json_filtered', value=js)
 
 
 
@@ -94,8 +93,9 @@ with DAG('load_weater_data',
          default_args=args
         ) as dag:
 
-    extract_data = PythonOperator(task_id='extract_data_kyiv', python_callable=extract_data_kyiv)
+    for city in cities:
+        extract_data_tsk = PythonOperator(task_id=f'extract_data_{city}', python_callable=extract_data, op_kwargs={'city': city})
 
-    transform_data  = PythonOperator(task_id='transform_data_kyiv', python_callable=transform_data_kyiv)
-    
-    extract_data >> transform_data
+        transform_data_tsk  = PythonOperator(task_id=f'transform_data_{city}', python_callable=transform_data, op_kwargs={'city': city})
+        
+        extract_data_tsk >> transform_data_tsk
