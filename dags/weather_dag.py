@@ -12,16 +12,7 @@ from airflow.operators.postgres_operator import PostgresOperator
 
 from airflow.models import Variable
 
-
-lat = 50.4501
-lng = 30.5234
-ua_timezone = 2
-
 wwo_key = Variable.get("KEY_API_WWO")
-
-#cities_str = Variable.get("CITIES")
-#cities = cities_str.split(', ')
-
 
 cities = {'north' : ['Kiev', 'Chernihiv', 'Sumy', 'Poltava', 'Zhytomyr', 'Cherkasy'],
           'south' : ['Vinnytsya', 'Kirovohrad', 'Mykolayiv', 'Odesa', 'Kherson', 'Simferopol'],
@@ -32,7 +23,22 @@ cities = {'north' : ['Kiev', 'Chernihiv', 'Sumy', 'Poltava', 'Zhytomyr', 'Cherka
 regions = ['north','south','east', 'west']
 
 def extract_data(city, **kwargs):
+
+    """
+    Extracts raw weather data from World Weather Online API for a specified city, and pushes it to XCom
+    for downstream tasks to use.
+    
+    Args:
+        city (str): Name of the city for which to extract weather data.
+        **kwargs: Arbitrary keyword arguments that include a TaskInstance (ti) object.
+        
+    Returns:
+        None
+    """
+
     ti = kwargs['ti']
+
+    # Send a GET request to the World Weather Online API for weather data for the specified city
     response = requests.get(
             'http://api.worldweatheronline.com/premium/v1/weather.ashx',
             params={
@@ -48,6 +54,7 @@ def extract_data(city, **kwargs):
             }
         )
 
+    # Check if the response status code is 200 (OK)
     if response.status_code==200:
         json_data = response.json()
         print(json_data)
@@ -57,14 +64,32 @@ def extract_data(city, **kwargs):
 
 
 def transform_data(city, **kwargs):
+
+    """
+    Transforms raw weather data extracted from World Weather Online API into a filtered dictionary,
+    and pushes it to XCom for downstream tasks to use.
+    
+    Args:
+        city (str): Name of the city for which to transform the weather data.
+        **kwargs: Arbitrary keyword arguments that include a TaskInstance (ti) object with an XCom
+                  key for the raw weather data extracted by the "extract_data_{city}" task.
+                  
+    Returns:
+        None
+    """
+
+    # Extract the TaskInstance (ti) object from the keyword arguments
     ti = kwargs['ti']
     json_data = ti.xcom_pull(key=f'wwo_{city}_json', task_ids=[f'extract_data_{city}'])[0]
+
+    # Extract the relevant data from the raw weather data JSON
     request_data = json_data['data']['request']
     time_data = json_data['data']['time_zone']
     weather_data = json_data['data']['current_condition']
 
     timestamp = datetime.datetime.strptime(time_data[0]['localtime'], '%Y-%m-%d %H:%M')
 
+    # Construct a filtered dictionary with the relevant weather data
     js = {
         'date': str(timestamp.date()),
         'time': str(timestamp.time()),
@@ -79,18 +104,31 @@ def transform_data(city, **kwargs):
         'cloudcover': weather_data[0]['cloudcover'],
         
     }
-
-
     ti.xcom_push(key=f'weather_{city}_json_filtered', value=js)
 
 
 def agg_region(cities, region, **kwargs):
+
+    """
+    Aggregates weather data for multiple cities into a single region and pushes it to XCom for downstream tasks to use.
+    
+    Args:
+        cities (list): List of city names for which to aggregate weather data.
+        region (str): Name of the region to which the cities belong.
+        **kwargs: Arbitrary keyword arguments that include a TaskInstance (ti) object.
+        
+    Returns:
+        None
+    """
+
     ti = kwargs['ti']
-    json_data = ti.xcom_pull(key='wwo_Kiev_json', task_ids=['extract_data_Kiev'])[0]
+
+    # Extract time data from JSON data for the first city in the list
+    json_data = ti.xcom_pull(key=f'wwo_{cities[0]}_json', task_ids=[f'extract_data_{cities[0]}'])[0]
     time_data = json_data['data']['time_zone']
-
+   
+    # Extract timestamp from time data and initialize the aggregated data dictionary
     timestamp = datetime.datetime.strptime(time_data[0]['localtime'], '%Y-%m-%d %H:%M')
-
     agg = {
         'date': str(timestamp.date()),
         'time': str(timestamp.time()),
@@ -99,13 +137,17 @@ def agg_region(cities, region, **kwargs):
         'humidity_avg' : 0,
         'cloudcover_avg' : 0
     }
-    
+
+    # Iterate over each city in the list and aggregate weather data for the region
     for city in cities:
+        # Pull filtered weather data for the city from XCom
         json_data = ti.xcom_pull(key=f'weather_{city}_json_filtered', task_ids=[f'transform_data_{city}'])[0]
+        # Update aggregated data with average temperature, humidity, and cloud cover for the region
         agg['temp_avg'] += int(json_data['temp_C'])
         agg['humidity_avg'] += int(json_data['humidity'])
         agg['cloudcover_avg'] += int(json_data['cloudcover'])
-    
+
+    # Calculate the average temperature, humidity, and cloud cover for the region
     agg['temp_avg'] /= len(cities)
     agg['humidity_avg'] /= len(cities)
     agg['cloudcover_avg'] /= len(cities)
@@ -163,6 +205,7 @@ with DAG('load_weather_dag',
          catchup=False
         ) as dag:
 
+    # Create table for weather_values
     create_weather_table = PostgresOperator(
                                 task_id="create_weather_table",
                                 postgres_conn_id="postgres_weather",
@@ -183,6 +226,7 @@ with DAG('load_weather_dag',
                                 """,
                                 )
 
+    # Create table for regions_weather_values
     crt = PostgresOperator( task_id="create_regions_table",
                                 postgres_conn_id="postgres_weather",
                                 sql="""
@@ -196,26 +240,33 @@ with DAG('load_weather_dag',
                                 """,
                                 )
 
+    # Loop over all regions
     for region in regions:
-
+        
+        # Aggregate data for each region
         agg_reg = PythonOperator(task_id=f'aggregate_{region}', python_callable=agg_region, op_kwargs={'cities': cities[region], 'region': region})
         
+        # Push aggregated data for each region to regions_weather_values table
         push_regions_data_tsk = PostgresOperator(
                         task_id=f"insert_regions_weather_table_{region}",
                         postgres_conn_id="postgres_weather",
                         sql=create_insert_region_query(region))
 
+        # Loop over all cities in each region
         for city in cities[region]:
-            extract_data_tsk = PythonOperator(task_id=f'extract_data_{city}', python_callable=extract_data, op_kwargs={'city': city})
 
+            # Extract weather data for each city
+            extract_data_tsk = PythonOperator(task_id=f'extract_data_{city}', python_callable=extract_data, op_kwargs={'city': city})
+            
+            # Transform weather data for each city
             transform_data_tsk  = PythonOperator(task_id=f'transform_data_{city}', python_callable=transform_data, op_kwargs={'city': city})
             
+            # Push transformed data for each city to weather_values table
             push_data_tsk = PostgresOperator(
                 task_id=f"insert_weather_table_{city}",
                 postgres_conn_id="postgres_weather",
                 sql=create_insert_query(city, region))
-        
 
-
+            # Define task dependencies
             extract_data_tsk >> transform_data_tsk >>  create_weather_table >> push_data_tsk >> agg_reg >> crt >> push_regions_data_tsk
     
