@@ -17,18 +17,19 @@ lat = 50.4501
 lng = 30.5234
 ua_timezone = 2
 
-# airflow variable
 wwo_key = Variable.get("KEY_API_WWO")
 
-cities_str = Variable.get("CITIES")
-cities = cities_str.split(', ')
+#cities_str = Variable.get("CITIES")
+#cities = cities_str.split(', ')
 
-#cities = [
-#    'Kiev', 'Chernihiv', 'Kharkiv', 'Kherson', 'Lviv', 'Ternopil', 'Odesa',
-#    'Donetsk Ukraine', 'Ivanofrankivsk', 'Chernivtsi', 'Cherkasy', 'Kirovohrad',
-#    'Lutsk Ukraine', 'Poltava', 'Rivne', 'Luhansk', 'Simferopol', 'Sumy', 'Uzhhorod',
-#    'Zhytomyr', 'Dnipropetrovsk', 'Zaporizhzhya', 'Mykolayiv', 'Khmelnytskyy', 'Vinnytsya'
-#]
+
+cities = {'north' : ['Kiev', 'Chernihiv', 'Sumy', 'Poltava', 'Zhytomyr', 'Cherkasy'],
+          'south' : ['Vinnytsya', 'Kirovohrad', 'Mykolayiv', 'Odesa', 'Kherson', 'Simferopol'],
+          'east' : ['Zaporizhzhya', 'Dnipropetrovsk', 'Kharkiv', 'Luhansk', 'Donetsk_Ukraine'],
+          'west' : ['Lutsk_Ukraine', 'Uzhhorod', 'Ivanofrankivsk', 'Lviv', 'Rivne',
+                    'Ternopil', 'Khmelnytskyy', 'Chernivtsi']}
+
+regions = ['north','south','east', 'west']
 
 def extract_data(city, **kwargs):
     ti = kwargs['ti']
@@ -79,15 +80,48 @@ def transform_data(city, **kwargs):
         
     }
 
+
     ti.xcom_push(key=f'weather_{city}_json_filtered', value=js)
 
 
-def create_insert_query(city):
+def agg_region(cities, region, **kwargs):
+    ti = kwargs['ti']
+    json_data = ti.xcom_pull(key='wwo_Kiev_json', task_ids=['extract_data_Kiev'])[0]
+    time_data = json_data['data']['time_zone']
+
+    timestamp = datetime.datetime.strptime(time_data[0]['localtime'], '%Y-%m-%d %H:%M')
+
+    agg = {
+        'date': str(timestamp.date()),
+        'time': str(timestamp.time()),
+        'region' : region,
+        'temp_avg' : 0,
+        'humidity_avg' : 0,
+        'cloudcover_avg' : 0
+    }
+    
+    for city in cities:
+        json_data = ti.xcom_pull(key=f'weather_{city}_json_filtered', task_ids=[f'transform_data_{city}'])[0]
+        agg['temp_avg'] += int(json_data['temp_C'])
+        agg['humidity_avg'] += int(json_data['humidity'])
+        agg['cloudcover_avg'] += int(json_data['cloudcover'])
+    
+    agg['temp_avg'] /= len(cities)
+    agg['humidity_avg'] /= len(cities)
+    agg['cloudcover_avg'] /= len(cities)
+
+
+    ti.xcom_push(key=f'weather_{region}_json_filtered', value=agg)
+
+
+
+def create_insert_query(city, region):
     query = f"""
     INSERT INTO weather_values VALUES (
         '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["date"] }}}}',
         '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["time"] }}}}',
         '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["city"] }}}}',
+        '{region}',
         '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["weather"] }}}}',
         '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["temp_C"] }}}}',
         '{{{{ ti.xcom_pull(key="weather_{city}_json_filtered", task_ids=["transform_data_{city}"])[0]["temp_C_feels_like"] }}}}',
@@ -100,6 +134,18 @@ def create_insert_query(city):
     """
     return query
 
+def create_insert_region_query(region):
+    query = f"""
+    INSERT INTO regions_weather_values VALUES (
+        '{{{{ ti.xcom_pull(key="weather_{region}_json_filtered", task_ids=["aggregate_{region}"])[0]["region"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{region}_json_filtered", task_ids=["aggregate_{region}"])[0]["date"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{region}_json_filtered", task_ids=["aggregate_{region}"])[0]["time"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{region}_json_filtered", task_ids=["aggregate_{region}"])[0]["temp_avg"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{region}_json_filtered", task_ids=["aggregate_{region}"])[0]["humidity_avg"] }}}}',
+        '{{{{ ti.xcom_pull(key="weather_{region}_json_filtered", task_ids=["aggregate_{region}"])[0]["cloudcover_avg"] }}}}'
+    )
+    """
+    return query
 
 args = {
     'owner' : 'Oleksii',
@@ -110,7 +156,7 @@ args = {
     'email_on_retry': False,
 }
 
-with DAG('load_weater_data',
+with DAG('test_dag',
          description='loading data from wwo api',
          schedule_interval='0 */2 * * *',
          default_args=args,
@@ -125,6 +171,7 @@ with DAG('load_weater_data',
                                     date DATE NOT NULL,
                                     time TIME NOT NULL,
                                     city VARCHAR NOT NULL,
+                                    region VARCHAR NOT NULL,
                                     weather VARCHAR NOT NULL,
                                     temp_C VARCHAR NOT NULL,
                                     temp_C_feels_like VARCHAR NOT NULL,
@@ -136,19 +183,39 @@ with DAG('load_weater_data',
                                 """,
                                 )
 
-    
+    crt = PostgresOperator( task_id="create_regions_table",
+                                postgres_conn_id="postgres_weather",
+                                sql="""
+                                    CREATE TABLE IF NOT EXISTS regions_weather_values (
+                                    region VARCHAR NOT NULL,
+                                    date DATE NOT NULL,
+                                    time TIME NOT NULL,
+                                    temp_C_avg VARCHAR NOT NULL,
+                                    humidity_avg FLOAT NOT NULL,
+                                    cloudcover_avg FLOAT NOT NULL);
+                                """,
+                                )
 
-    for city in cities:
-        extract_data_tsk = PythonOperator(task_id=f'extract_data_{city}', python_callable=extract_data, op_kwargs={'city': city})
+    for region in regions:
 
-        transform_data_tsk  = PythonOperator(task_id=f'transform_data_{city}', python_callable=transform_data, op_kwargs={'city': city})
+        agg_reg = PythonOperator(task_id=f'aggregate_{region}', python_callable=agg_region, op_kwargs={'cities': cities[region], 'region': region})
         
-        push_data_tsk = PostgresOperator(
-            task_id=f"insert_weather_table_{city}",
-            postgres_conn_id="postgres_weather",
-            sql=create_insert_query(city))
+        push_regions_data_tsk = PostgresOperator(
+                        task_id=f"insert_regions_weather_table_{region}",
+                        postgres_conn_id="postgres_weather",
+                        sql=create_insert_region_query(region))
+
+        for city in cities[region]:
+            extract_data_tsk = PythonOperator(task_id=f'extract_data_{city}', python_callable=extract_data, op_kwargs={'city': city})
+
+            transform_data_tsk  = PythonOperator(task_id=f'transform_data_{city}', python_callable=transform_data, op_kwargs={'city': city})
             
-        extract_data_tsk >> transform_data_tsk >> create_weather_table >> push_data_tsk
+            push_data_tsk = PostgresOperator(
+                task_id=f"insert_weather_table_{city}",
+                postgres_conn_id="postgres_weather",
+                sql=create_insert_query(city, region))
+        
+
+
+            extract_data_tsk >> transform_data_tsk >>  create_weather_table >> push_data_tsk >> agg_reg >> crt >> push_regions_data_tsk
     
-
-
