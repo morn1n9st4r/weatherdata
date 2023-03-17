@@ -156,8 +156,8 @@ args = {
     'email_on_retry': False,
 }
 
-with DAG('test_dag',
-         description='loading data from wwo api',
+with DAG('load_weather_dag',
+         description='loading data from wwo api and calculate averages by regions',
          schedule_interval='0 */2 * * *',
          default_args=args,
          catchup=False
